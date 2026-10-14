@@ -1,0 +1,7 @@
+# GenLayer SDK + test toolchain, pinned to the versions verified in this repo.
+# Install into a virtualenv:  pip install -r requirements.txt
+genlayer-py==0.16.3
+genlayer-test==0.29.2
+genvm-linter==0.11.0
+python-dotenv>=1.0
+pytest>=8.0

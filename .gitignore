@@ -1,0 +1,28 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env.venv/
+
+# Test / tooling caches
+.pytest_cache/
+.gltest_cache/
+.genvm_cache/
+.mypy_cache/
+migrations/
+
+# GenLayer local artifacts
+genlayer.json
+node_modules/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

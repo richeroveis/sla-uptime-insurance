@@ -1,0 +1,66 @@
+{
+  "network": {
+    "name": "studionet",
+    "chain_id": 61999,
+    "rpc_urls": [
+      "default"
+    ]
+  },
+  "deployer": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
+  "contract_address": "0xD938694c9C745d9816650B944a32D3c45a95E710",
+  "deploy_tx": "0xfdaab70df0f936d437c167c4d90aa44261ee8db85bd8ea9ed35e64df2eea0865",
+  "explorer": "https://explorer-studio.genlayer.com/address/0xD938694c9C745d9816650B944a32D3c45a95E710",
+  "runner": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
+  "evidence": {
+    "policy_id_return": "1",
+    "policy_after": {
+      "active": true,
+      "collateral_pool": 1000000,
+      "failed_checks": 0,
+      "policy_id": 1,
+      "provider": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
+      "service_name": "payments-api",
+      "slash_rate_bps": 200,
+      "status_url": "https://www.githubstatus.com/api/v2/status.json",
+      "subscriber_count": 1,
+      "target_uptime_bps": 9990,
+      "total_checks": 0
+    },
+    "metrics": {
+      "breach_margin_bps": 10,
+      "compliant": true,
+      "failed_checks": 0,
+      "policy_id": 1,
+      "service_name": "payments-api",
+      "target_uptime_bps": 9990,
+      "total_checks": 0,
+      "uptime_bps": 10000
+    },
+    "claimable": 0,
+    "transactions": [
+      {
+        "step": "register_policy",
+        "tx": "0x5e454baa2ee1aa0efd83275ed298cc8fb377f6b325bf86a1fefe26b73db6e001",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "return_data": "1"
+      },
+      {
+        "step": "subscribe_to_policy",
+        "tx": "0xcf7d5dab95bf5b16935ba6dbd144f9565b27c75f594f73937576fd03d59e5b21",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return"
+      },
+      {
+        "step": "register_policy_invalid",
+        "tx": "0x3922c07934442f18df5404b020b5b9986bcc923616ca3a15877c05295d312f1a",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "rollback",
+        "revert_reason": "[EXPECTED] status_url must be http(s)"
+      }
+    ],
+    "invalid_reverted": true,
+    "invalid_revert_reason": "[EXPECTED] status_url must be http(s)"
+  },
+  "verified_at": "2026-10-14T12:40:59Z"
+}

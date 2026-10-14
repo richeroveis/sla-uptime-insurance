@@ -1,0 +1,20 @@
+# GenLayer integration-test / gltest configuration for SLAUptimeInsurance.
+#
+# Deliberately contains NO private keys. The integration test and the deploy
+# driver build their client/account directly from the GENLAYER_PRIVATE_KEY
+# environment variable (loaded from the git-ignored .env) via
+# `genlayer_py.create_account`, not through gltest's config-driven accounts.
+networks:
+  default: studionet
+  studionet:
+    url: https://studio.genlayer.com/api
+    chain_type: studionet
+    # studionet finalisation is slow; the SDK defaults are too tight.
+    default_wait_interval: 6000
+    default_wait_retries: 60
+
+paths:
+  contracts: contracts
+  artifacts: artifacts
+
+environment: .env
