@@ -11,6 +11,7 @@ writes an immutable incident record.
 - Network: GenLayer `studionet` (chain id `61999`)
 - Deployed address: `0xD938694c9C745d9816650B944a32D3c45a95E710`
 - Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
+- Deployed commit / tag: `714393c` (`studionet-v1`)
 
 This is a pure contract primitive. There is no frontend by design; the value it
 delivers is a reusable, composable, consensus-backed enforcement component that
