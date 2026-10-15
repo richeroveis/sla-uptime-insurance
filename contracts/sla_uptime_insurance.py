@@ -36,13 +36,17 @@ ERROR_TRANSIENT = "[TRANSIENT]"
 ERROR_LLM = "[LLM_ERROR]"
 
 # Input bounds. Everything that feeds integer money math is bounded so products
-# cannot approach the u256 ceiling.
+# cannot approach the u256 ceiling, and every free-text input carries a hard
+# length cap so a caller can neither bloat storage nor the LLM prompt.
 BASIS_POINTS_MAX = 10000
 SEVERITY_WEIGHT_MAX = 100
-MAX_SERVICE_NAME_LEN = 128
-MAX_STATUS_URL_LEN = 2048
-MAX_COLLATERAL = 10**24
-MAX_SLASH_RATE_BPS = 500  # a single policy may slash at most 5% of collateral per incident
+MIN_STATUS_URL_LEN = 8
+MAX_SERVICE_NAME_LEN = 64
+MAX_STATUS_URL_LEN = 512
+MAX_SUMMARY_LEN = 300
+MAX_WEB_WINDOW = 6000  # safe character window of the fetched page fed to the LLM
+MAX_COLLATERAL = 10**30
+MAX_SLASH_RATE_BPS = 5000  # a single policy may slash at most 50% of collateral per incident
 
 
 @allow_storage
@@ -149,7 +153,7 @@ def _parse_health(raw, service_name: str) -> dict:
     is_sla_breached = _coerce_bool(breach_val)
 
     summary_val = data.get("summary")
-    summary = str(summary_val).strip()[:280] if summary_val is not None else service_name
+    summary = str(summary_val).strip()[:MAX_SUMMARY_LEN] if summary_val is not None else service_name
 
     return {
         "status_code": status_code,
@@ -197,20 +201,23 @@ class SLAUptimeInsurance(gl.Contract):
             )
 
         url = str(status_url).strip()
-        if len(url) == 0 or len(url) > MAX_STATUS_URL_LEN:
+        if len(url) < MIN_STATUS_URL_LEN or len(url) > MAX_STATUS_URL_LEN:
             raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} status_url must be 1..{MAX_STATUS_URL_LEN} chars"
+                f"{ERROR_EXPECTED} status_url must be {MIN_STATUS_URL_LEN}..{MAX_STATUS_URL_LEN} chars"
             )
         if not (url.startswith("http://") or url.startswith("https://")):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} status_url must be http(s)")
+        # A URL is a single token: any embedded whitespace or newline is either a
+        # malformed value or a smuggling attempt into the later fetch/prompt path.
+        for ch in url:
+            if ch.isspace():
+                raise gl.vm.UserError(
+                    f"{ERROR_EXPECTED} status_url must not contain whitespace or newlines"
+                )
 
         if target_uptime_bps <= 0 or target_uptime_bps > BASIS_POINTS_MAX:
             raise gl.vm.UserError(
                 f"{ERROR_EXPECTED} target_uptime_bps must be in 1..{BASIS_POINTS_MAX}"
-            )
-        if slash_rate_bps <= 0 or slash_rate_bps > BASIS_POINTS_MAX:
-            raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} slash_rate_bps must be in 1..{BASIS_POINTS_MAX}"
             )
         # Floor and ceiling on the collateral so slash products stay far below the
         # u256 ceiling and a slash rate cannot be used to nuke a whole pool.
@@ -218,9 +225,9 @@ class SLAUptimeInsurance(gl.Contract):
             raise gl.vm.UserError(
                 f"{ERROR_EXPECTED} collateral_amount must be in 1..{MAX_COLLATERAL}"
             )
-        if slash_rate_bps > MAX_SLASH_RATE_BPS:
+        if slash_rate_bps <= 0 or slash_rate_bps > MAX_SLASH_RATE_BPS:
             raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} slash_rate_bps exceeds {MAX_SLASH_RATE_BPS} bps per-incident cap"
+                f"{ERROR_EXPECTED} slash_rate_bps must be in 1..{MAX_SLASH_RATE_BPS}"
             )
 
         policy_id = self.next_policy_id
@@ -263,6 +270,15 @@ class SLAUptimeInsurance(gl.Contract):
         if not policy.active:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Policy {policy_id} is inactive")
 
+        # Griefing / wasted-collateral guard: never run a health check or slash a
+        # policy that protects nobody. With zero subscribers there is no insured
+        # party, so an outage would only burn provider collateral for no benefit.
+        subs = self.policy_subscribers.get_or_insert_default(policy_id)
+        if len(subs) == 0:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} Policy {policy_id} has no subscribers to protect"
+            )
+
         # Read every storage value used by the nondet block BEFORE entering it.
         # The nondet function must not touch contract state.
         status_url = policy.status_url
@@ -288,7 +304,7 @@ class SLAUptimeInsurance(gl.Contract):
                 "explanation citing the evidence you saw). "
                 "OPERATIONAL means fully up, DEGRADED means partial or impaired "
                 "service, MAJOR_OUTAGE means unavailable or down.\n\n"
-                f"STATUS PAGE TEXT:\n{str(page)[:4000]}"
+                f"STATUS PAGE TEXT:\n{str(page)[:MAX_WEB_WINDOW]}"
             )
             raw = gl.nondet.exec_prompt(prompt, response_format="json")
             return _parse_health(raw, service_name)
@@ -323,9 +339,8 @@ class SLAUptimeInsurance(gl.Contract):
             if proposed_slash > policy.collateral_pool:
                 proposed_slash = policy.collateral_pool
 
-            subs = self.policy_subscribers.get_or_insert_default(policy_id)
             subscriber_count = len(subs)
-            if subscriber_count > 0 and proposed_slash > 0:
+            if proposed_slash > 0:
                 per_sub = proposed_slash // subscriber_count
                 if per_sub > 0:
                     # Only the amount actually credited leaves the pool, so the
@@ -337,13 +352,9 @@ class SLAUptimeInsurance(gl.Contract):
                     policy.collateral_pool = policy.collateral_pool - moved
                     slashed_amount = moved
                 # else: proposed slash is smaller than the subscriber count, so it
-                # cannot be split. Nothing moves and slashed_amount stays 0, which
-                # keeps the incident record honest (never overstates the penalty).
-            elif subscriber_count == 0 and proposed_slash > 0:
-                # Penalty forfeit: a confirmed outage with no subscriber to pay
-                # still reduces the provider's collateral and accrues to no one.
-                policy.collateral_pool = policy.collateral_pool - proposed_slash
-                slashed_amount = proposed_slash
+                # cannot be split into at least one unit each. Nothing moves and
+                # slashed_amount stays 0, keeping the incident record honest (it
+                # never overstates a penalty that was not actually paid out).
 
         incident_id = self.next_incident_id
         self.incidents[incident_id] = IncidentRecord(
@@ -352,7 +363,7 @@ class SLAUptimeInsurance(gl.Contract):
             status_code=status_code,
             severity_score=severity_score,
             slashed_amount=slashed_amount,
-            summary=str(snapshot.get("summary", ""))[:280],
+            summary=str(snapshot.get("summary", ""))[:MAX_SUMMARY_LEN],
         )
         self.next_incident_id = incident_id + 1
         self.policies[policy_id] = policy
@@ -367,6 +378,35 @@ class SLAUptimeInsurance(gl.Contract):
             return 0
         # Reset before returning so a claim cannot be replayed.
         self.claimable_balances[sender] = 0
+        return amount
+
+    @gl.public.write
+    def deactivate_and_withdraw_collateral(self, policy_id: u256) -> u256:
+        # Provider exit path. Deactivate a policy and move its remaining
+        # collateral into the provider's claimable balance so collateral is never
+        # permanently trapped in an abandoned policy. The provider then pulls the
+        # funds out through the same claim_compensation path as subscribers.
+        if policy_id not in self.policies:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Unknown policy {policy_id}")
+
+        policy = self.policies[policy_id]
+        sender = gl.message.sender_address
+        if sender != policy.provider:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} Only the provider may withdraw policy {policy_id}"
+            )
+        if not policy.active:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Policy {policy_id} is inactive")
+
+        amount = policy.collateral_pool
+        if amount > 0:
+            # Credit first, then zero the pool, so the accounting invariant
+            # (collateral decrease == claimable increase) always holds.
+            current = self.claimable_balances.get(sender, 0)
+            self.claimable_balances[sender] = current + amount
+            policy.collateral_pool = 0
+        policy.active = False
+        self.policies[policy_id] = policy
         return amount
 
     @gl.public.view

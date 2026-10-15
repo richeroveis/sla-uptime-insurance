@@ -9,9 +9,9 @@ writes an immutable incident record.
 
 - Contract: [`contracts/sla_uptime_insurance.py`](contracts/sla_uptime_insurance.py)
 - Network: GenLayer `studionet` (chain id `61999`)
-- Deployed address: `0xD938694c9C745d9816650B944a32D3c45a95E710`
+- Deployed address: `0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9`
 - Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
-- Deployed commit / tag: `714393c` (`studionet-v1`)
+- Deployed source tag: `studionet-v1` (the hardened `main` HEAD)
 
 This is a pure contract primitive. There is no frontend by design; the value it
 delivers is a reusable, composable, consensus-backed enforcement component that
@@ -173,8 +173,10 @@ per_sub    = slashed // subscriber_count                  # equal split
 `slashed` is capped at `collateral_pool`, `per_sub` is credited to each
 subscriber's `claimable_balances`, and only the actually-distributed amount
 (`per_sub * subscriber_count`) is deducted from the pool, so rounding dust is
-never minted or double-counted. With no subscribers the slash is recorded but not
-redistributed.
+never minted or double-counted. Every evaluation requires an active policy with
+at least one subscriber, so there is no zero-subscriber burn path, and a provider
+can withdraw the remaining pool at any time through
+`deactivate_and_withdraw_collateral`.
 
 ---
 
@@ -184,10 +186,11 @@ redistributed.
 
 | Method | Parameters | Returns | Notes |
 |--------|-----------|---------|-------|
-| `register_policy` | `service_name: str, status_url: str, target_uptime_bps: u256, collateral_amount: u256, slash_rate_bps: u256` | `u256` (policy_id) | Validates name/URL scheme, bounds `target<=10000`, `slash_rate_bps in 1..500` (5% per-incident cap), `collateral in 1..1e24` |
+| `register_policy` | `service_name: str, status_url: str, target_uptime_bps: u256, collateral_amount: u256, slash_rate_bps: u256` | `u256` (policy_id) | Rejects unless `service_name` is 1..64 chars, `status_url` is 8..512 chars, is http(s), and has no whitespace or newline; `target_uptime_bps` in 1..10000; `0 < slash_rate_bps <= 5000`; `0 < collateral_amount <= 1e30` |
 | `subscribe_to_policy` | `policy_id: u256` | `None` | Registers caller as a protected subscriber; rejects duplicates and unknown policies |
-| `evaluate_service_health` | `policy_id: u256` | `str` (status_code) | Runs the consensus classification, updates counters, slashes and distributes on failure, writes an incident |
+| `evaluate_service_health` | `policy_id: u256` | `str` (status_code) | Requires an active policy with at least one subscriber; runs the consensus classification, updates counters, slashes and distributes on failure, writes an incident |
 | `claim_compensation` | none | `u256` (claimed) | Pays out and resets the caller's claimable balance (reset-before-return prevents replay) |
+| `deactivate_and_withdraw_collateral` | `policy_id: u256` | `u256` (withdrawn) | Provider-only; deactivates the policy and moves the remaining `collateral_pool` into the provider's claimable balance, so collateral is never trapped |
 
 ### View methods (`@gl.public.view`)
 
@@ -217,30 +220,41 @@ is a lifecycle state, not proof of success).
 
 Machine-readable proof: [`evidence/studionet-deploy.json`](evidence/studionet-deploy.json).
 
-- Contract address: `0xD938694c9C745d9816650B944a32D3c45a95E710`
-- Explorer: https://explorer-studio.genlayer.com/address/0xD938694c9C745d9816650B944a32D3c45a95E710
-- Deploy tx: `0xfdaab70df0f936d437c167c4d90aa44261ee8db85bd8ea9ed35e64df2eea0865`
+- Contract address: `0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9`
+- Explorer: https://explorer-studio.genlayer.com/address/0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9
+- Deploy tx: `0xe22a60ec8ca08695bb13d060861068dcf4a1cbdb05234735c44d3365439701e0`
+- Provider (deployer) account: `0x154a452b0755EE812014C1405B15D905BA06f9c7`; a
+  separate ephemeral account is the subscriber, so the two roles are distinct.
 
 | Step | Transaction | Result |
 |------|-------------|--------|
-| `register_policy` (collateral 1000000, rate 200bps, target 9990) | `0x5e454baa2ee1aa0efd83275ed298cc8fb377f6b325bf86a1fefe26b73db6e001` | `return`, policy_id `1` |
-| `subscribe_to_policy(1)` | `0xcf7d5dab95bf5b16935ba6dbd144f9565b27c75f594f73937576fd03d59e5b21` | `return`, subscriber_count 0 -> 1 |
-| `register_policy` with invalid `ftp://` URL | `0x3922c07934442f18df5404b020b5b9986bcc923616ca3a15877c05295d312f1a` | `rollback`, `[EXPECTED] status_url must be http(s)` |
+| `register_policy` (collateral 1000000, rate 200bps, target 9990) | `0xd4c7edbcb49b3c72779d96ec4a3b7860669bcf021b30197d36afbbebe74310f9` | `return`, policy_id `1` |
+| `subscribe_to_policy(1)` (by subscriber) | `0x0c11bddd395356ed09d1a0e097c0ed3c84d3e82bb18d5742f6ae2037d3092205` | `return`, subscriber_count 0 -> 1 |
+| `deactivate_and_withdraw_collateral(1)` by NON-provider | `0x553d823f98c30471f3d057b280fc2cc7e9d976165298f15b80a9d93a3895bb9c` | `rollback`, `[EXPECTED] Only the provider may withdraw policy 1` |
+| `deactivate_and_withdraw_collateral(1)` by provider | `0x3aa1804439a282d6cea7d0e1e08fbd9c8af7cc62b5e8e11872636366b3852742` | `return`, withdrawn `1000000` |
+| `register_policy` with invalid `ftp://` URL | `0xa51ade4131010ab332af2f3d0b0e6f74a001afc7fcbe8fdad1f06664b8c0566e` | `rollback`, `[EXPECTED] status_url must be http(s)` |
 
-Read-back through the view interface after the writes:
+Read-back through the view interface:
 
-- `get_policy(1)`: provider `0x154a...f9c7`, `collateral_pool 1000000`, `slash_rate_bps 200`, `subscriber_count 1`, `total_checks 0`, `active true`.
+- `get_policy(1)` after subscribe: provider `0x154a...f9c7`, `collateral_pool 1000000`, `slash_rate_bps 200`, `subscriber_count 1`, `total_checks 0`, `active true`.
 - `get_compliance_metrics(1)`: `uptime_bps 10000`, `target_uptime_bps 9990`, `compliant true`.
-- `get_claimable_balance(deployer)`: `0` (no incident has fired yet).
+- `get_policy(1)` after the provider withdraw: `active false`, `collateral_pool 0`.
+- `get_claimable_balance(provider)` after withdraw: `1000000` (the withdrawn collateral, claimable via `claim_compensation`).
 
-The adversarial-input revert observed on chain matches the direct-mode revert
-exactly, which is the point: consensus agrees on the failure path too.
+Both attack paths (the non-provider withdraw and the malformed URL) revert on
+chain with exactly the same `[EXPECTED]` reason they produce in direct mode,
+which is the point: consensus agrees on the failure paths too, and the accounting
+stays conserved (the withdrawn 1000000 leaves the pool and lands in the provider
+claimable balance, nothing else).
 
-Deployment integrity: the `contract_code` served by the public explorer for the
-address above is byte-for-byte identical to `contracts/sla_uptime_insurance.py`
-as committed here. Both hash to
-`sha256 7deea4488e76703a0de440659e37fadc64e520aba5e8c58fe3679ecbeafaeaa9`, so the
-submitted source is exactly what runs on `studionet`.
+Deployment integrity: the code returned by `gen_getContractCode` for the address
+above decodes to source that is byte-for-byte identical to
+`contracts/sla_uptime_insurance.py`. Local file, on-chain code and the GitHub
+raw file all hash to
+`sha256 f79e60e9bff30498ef1f5eb007ed998867c8a45c99600563fbc0286dc4691cb7`
+(19462 bytes), so the submitted source is exactly what runs on `studionet`.
+`.gitattributes` pins `* text=auto eol=lf` so the committed and fetched bytes are
+LF and match the deployed bytes.
 
 ---
 
@@ -269,10 +283,15 @@ pytest                          # runs the direct suite; integration is deselect
 pytest tests/test_sla_direct.py -v
 ```
 
-10 direct tests cover: policy registration and read-back, every input-validation
-revert, subscriber registration plus duplicate prevention, `OPERATIONAL`
-(0 slash), `DEGRADED` (50% weight) and `MAJOR_OUTAGE` (100% weight) evaluations,
-multi-subscriber payout distribution, the zero-subscriber edge case, and
+22 direct tests cover: policy registration and read-back; every input-validation
+revert (URL scheme, the 8..512 length window, embedded whitespace and newlines,
+the 1..64 `service_name` cap, and the `target`, `slash_rate` and `collateral`
+numeric bounds); subscriber registration plus duplicate prevention; the
+`OPERATIONAL`, `DEGRADED` and `MAJOR_OUTAGE` evaluations; multi-subscriber payout
+distribution and rounding-dust conservation; the incident summary truncation cap;
+the zero-subscriber and inactive-policy griefing guards on `evaluate_service_health`;
+the provider `deactivate_and_withdraw_collateral` path (full and partial, plus
+non-provider, double-withdraw and unknown-policy rejections); and
 `claim_compensation` reset semantics. Web render and LLM classification are
 mocked; the consensus validator path is exercised on `studionet`.
 
@@ -282,9 +301,13 @@ mocked; the consensus validator path is exercised on `studionet`.
 python scripts/deploy_studionet.py
 ```
 
-Deploys the contract, submits `register_policy` and `subscribe_to_policy`, reads
-state back through the view methods, attempts one adversarial `register_policy`
-that must revert, and writes the full proof to `evidence/studionet-deploy.json`.
+Deploys the contract, submits `register_policy`, then `subscribe_to_policy` from
+a second ephemeral account, attempts a NON-provider `deactivate_and_withdraw_collateral`
+(that must revert), performs the provider `deactivate_and_withdraw_collateral`,
+reads state back through the view methods, attempts one adversarial
+`register_policy` that must revert, verifies that the deployed `gen_getContractCode`
+bytes hash to the same sha256 as the local file, and writes the full proof to
+`evidence/studionet-deploy.json`.
 
 ### Run the integration test against `studionet`
 
@@ -302,10 +325,13 @@ wait for receipts (the driver already does).
 contracts/sla_uptime_insurance.py   the primitive
 tests/test_sla_direct.py            fast direct-mode tests
 tests/test_sla_integration.py       live studionet integration test
-scripts/deploy_studionet.py         deploy + drive + evidence collection
+tests/conftest.py                   makes the direct harness run on Windows (no-op elsewhere)
+scripts/deploy_studionet.py         deploy + drive + integrity + evidence collection
 evidence/studionet-deploy.json      machine-readable on-chain proof
+docs/adversarial-review.md          adversarial security review, findings and proofs
 gltest.config.yaml                  network config (no secrets)
 requirements.txt                    pinned toolchain
+.gitattributes                      pins LF line endings for byte-exact integrity
 .env.example                        template; real .env is git-ignored
 ```
 
@@ -318,10 +344,19 @@ requirements.txt                    pinned toolchain
 - Every transition that moves value depends on validator-agreed external
   evidence, not a caller's claim, and each validator re-verifies the source.
 - All inputs that later feed fund math carry explicit floors and ceilings
-  (uptime bps, slash rate, collateral magnitude, URL/name lengths).
+  (`target_uptime_bps` in 1..10000, `0 < slash_rate_bps <= 5000`,
+  `0 < collateral_amount <= 1e30`, `service_name` 1..64 chars, `status_url`
+  8..512 chars, http(s) and free of whitespace or newlines).
 - Slash is capped by the collateral pool, distribution only deducts what it
   actually credits (no rounding mint), and claims reset the balance before
   returning so a claim cannot be replayed.
+- `deactivate_and_withdraw_collateral` is provider-only and active-only, so the
+  full exit path (slash, withdraw, claim) is conserved and cannot be replayed or
+  called by the wrong party.
+
+The full adversarial walk-through (state machine, races, invariant, findings and
+the test that closes each one) lives in
+[`docs/adversarial-review.md`](docs/adversarial-review.md).
 
 ### Known limitations & trust assumptions (stated honestly)
 
@@ -331,16 +366,15 @@ requirements.txt                    pinned toolchain
   reputable, independent status endpoints, and every validator re-fetches the page
   itself. The contract does not, and cannot claim to be, injection-proof against a
   provider who fully controls a misleading page.
-- `evaluate_service_health` is permissionless. Any account can trigger a check. A
-  false slash still requires validator consensus on a real outage, so funds are
-  safe, but an attacker could inflate `total_checks` with genuine OPERATIONAL
-  readings. A deployment that cares about this should gate evaluation to the
-  provider and its subscribers.
-- Confirmed outage with zero subscribers forfeits the slash: it lowers
-  `collateral_pool` and accrues to nobody, so it is a penalty burn rather than a
-  transfer. This is intentional (an outage is penalized even mid-membership-change)
-  and is covered by a dedicated test.
-- There is no provider refund/withdraw path in this primitive. Collateral is
-  internal accounting (the contract holds no native value), so nothing real is
-  locked; a wrapping escrow is expected to supply redemption on top of the
-  slashing ledger this contract maintains.
+- `evaluate_service_health` is permissionless. Any account can trigger a check on
+  an active policy that has at least one subscriber. A false slash still requires
+  validator consensus on a real outage, so funds are safe, but an attacker could
+  inflate `total_checks` with genuine OPERATIONAL readings. A deployment that
+  cares about this should gate evaluation to the provider and its subscribers.
+- An outage on a policy with zero subscribers can no longer be evaluated: the
+  call reverts, so provider collateral is never burned to pay nobody (griefing
+  guard), covered by a dedicated test.
+- Collateral is internal accounting (the contract holds no native value). The
+  provider withdraw path moves the remaining pool into a claimable balance rather
+  than transferring native GEN, so nothing real is locked in this primitive; a
+  wrapping escrow can settle the claimable ledger against real funds.

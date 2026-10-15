@@ -1,9 +1,11 @@
 """Direct-mode tests for SLAUptimeInsurance.
 
 Fast, in-memory (no server). Validates input guards, subscriber accounting, the
-slash math for each health outcome, payout distribution, and compensation
-claims. Web render + LLM classification are mocked; the equivalence-principle
-validator path is exercised by the integration tests, not here.
+slash math for each health outcome, payout distribution, compensation claims, the
+provider collateral withdrawal path, and the griefing guards added in the
+hardening pass. Web render plus the LLM classification are mocked; the
+equivalence-principle validator path is exercised by the integration tests, not
+here.
 """
 
 import json
@@ -67,31 +69,81 @@ def test_register_policy_and_read_back(direct_vm, direct_deploy, direct_alice):
     assert pid2 == 2
 
 
-def test_register_policy_input_validation(direct_vm, direct_deploy, direct_alice):
+def test_register_status_url_scheme_and_length_bounds(
+    direct_vm, direct_deploy, direct_alice
+):
     contract = direct_deploy(CONTRACT)
     direct_vm.sender = direct_alice
 
-    with direct_vm.expect_revert("status_url must be http"):
+    # Wrong scheme.
+    with direct_vm.expect_revert("must be http(s)"):
         contract.register_policy("svc", "ftp://bad.example.com", 9990, 1000, 200)
 
-    with direct_vm.expect_revert("target_uptime_bps"):
-        contract.register_policy("svc", STATUS_URL, 10001, 1000, 200)
+    # Too short (below the 8 char floor).
+    with direct_vm.expect_revert("8..512"):
+        contract.register_policy("svc", "http://", 9990, 1000, 200)
 
-    with direct_vm.expect_revert("slash_rate_bps"):
-        contract.register_policy("svc", STATUS_URL, 9990, 1000, 0)
+    # Too long (above the 512 char ceiling).
+    with direct_vm.expect_revert("8..512"):
+        contract.register_policy("svc", "https://" + "a" * 600, 9990, 1000, 200)
 
-    with direct_vm.expect_revert("collateral_amount"):
-        contract.register_policy("svc", STATUS_URL, 9990, 0, 200)
+    # A valid boundary registration still succeeds after the reverts.
+    assert contract.register_policy("svc", STATUS_URL, 9990, 1000, 200) == 1
 
+
+def test_register_status_url_whitespace_rejected(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    # Embedded space.
+    with direct_vm.expect_revert("whitespace"):
+        contract.register_policy("svc", "https://exa mple.com/health", 9990, 1000, 200)
+
+    # Embedded newline.
+    with direct_vm.expect_revert("whitespace"):
+        contract.register_policy("svc", "https://example.com/\nhealth", 9990, 1000, 200)
+
+
+def test_register_service_name_length_cap(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    # service_name is capped at 64 characters.
+    with direct_vm.expect_revert("service_name"):
+        contract.register_policy("s" * 65, STATUS_URL, 9990, 1000, 200)
+
+    # Empty after stripping is rejected too.
     with direct_vm.expect_revert("service_name"):
         contract.register_policy("   ", STATUS_URL, 9990, 1000, 200)
 
-    # slash_rate above the 5% (500 bps) single-incident cap is rejected.
-    with direct_vm.expect_revert("per-incident cap"):
-        contract.register_policy("svc", STATUS_URL, 9990, 1000, 600)
+    # Exactly 64 characters is accepted.
+    assert contract.register_policy("n" * 64, STATUS_URL, 9990, 1000, 200) == 1
 
-    # Nothing valid was stored, so next id is still 1.
-    assert contract.register_policy("svc", STATUS_URL, 9990, 1000, 200) == 1
+
+def test_register_numeric_bounds(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    # target_uptime_bps must sit in 1..10000.
+    with direct_vm.expect_revert("target_uptime_bps"):
+        contract.register_policy("svc", STATUS_URL, 10001, 1000, 200)
+    with direct_vm.expect_revert("target_uptime_bps"):
+        contract.register_policy("svc", STATUS_URL, 0, 1000, 200)
+
+    # collateral_amount must sit in 1..1e30.
+    with direct_vm.expect_revert("collateral_amount"):
+        contract.register_policy("svc", STATUS_URL, 9990, 0, 200)
+    with direct_vm.expect_revert("collateral_amount"):
+        contract.register_policy("svc", STATUS_URL, 9990, 10**30 + 1, 200)
+
+    # slash_rate_bps must sit in 1..5000.
+    with direct_vm.expect_revert("slash_rate_bps"):
+        contract.register_policy("svc", STATUS_URL, 9990, 1000, 0)
+    with direct_vm.expect_revert("slash_rate_bps"):
+        contract.register_policy("svc", STATUS_URL, 9990, 1000, 5001)
+
+    # The 5000 bps ceiling itself is allowed.
+    assert contract.register_policy("svc", STATUS_URL, 9990, 1000, 5000) == 1
 
 
 def test_subscribe_and_prevent_duplicates(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -117,9 +169,11 @@ def test_subscribe_unknown_policy(direct_vm, direct_deploy, direct_alice):
         contract.subscribe_to_policy(999)
 
 
-def test_evaluate_operational_no_slash(direct_vm, direct_deploy, direct_alice):
+def test_evaluate_operational_no_slash(direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = direct_deploy(CONTRACT)
     pid = _register(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_bob
+    contract.subscribe_to_policy(pid)  # the guard needs at least one subscriber
 
     _mock_health(direct_vm, "OPERATIONAL", 0, False)
     direct_vm.sender = direct_alice
@@ -194,38 +248,36 @@ def test_evaluate_major_outage_full_weight_distribution(
     assert metrics["compliant"] is False
 
 
-def test_claim_compensation_resets_balance(direct_vm, direct_deploy, direct_alice, direct_bob):
+def test_evaluate_zero_subscribers_reverts(direct_vm, direct_deploy, direct_alice):
+    # Griefing guard: an outage on a policy with no insured subscriber must not
+    # burn collateral, so evaluation reverts before it reaches the nondet block.
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice)
+
+    _mock_health(direct_vm, "MAJOR_OUTAGE", 100, True)
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("no subscribers"):
+        contract.evaluate_service_health(pid)
+
+    # No state moved: collateral is intact and no incident was recorded.
+    assert contract.get_policy(pid)["collateral_pool"] == 1000
+    assert contract.get_policy(pid)["total_checks"] == 0
+
+
+def test_evaluate_inactive_policy_reverts(direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = direct_deploy(CONTRACT)
     pid = _register(contract, direct_vm, direct_alice)
     direct_vm.sender = direct_bob
     contract.subscribe_to_policy(pid)
 
+    # Provider withdraws, which flips active to False.
+    direct_vm.sender = direct_alice
+    contract.deactivate_and_withdraw_collateral(pid)
+
     _mock_health(direct_vm, "MAJOR_OUTAGE", 100, True)
     direct_vm.sender = direct_alice
-    contract.evaluate_service_health(pid)
-
-    direct_vm.sender = direct_bob
-    claimed = contract.claim_compensation()
-    assert claimed == 20  # single subscriber receives the full slash
-    assert contract.get_claimable_balance(_hex(direct_bob)) == 0
-
-    # Reclaim is a no-op once reset.
-    assert contract.claim_compensation() == 0
-
-
-def test_evaluate_zero_subscribers_forfeits_slash(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy(CONTRACT)
-    pid = _register(contract, direct_vm, direct_alice)
-
-    # Slash 20 with no subscribers: collateral is still reduced (forfeit), but
-    # nothing becomes claimable because there is nobody to pay.
-    _mock_health(direct_vm, "MAJOR_OUTAGE", 100, True)
-    direct_vm.sender = direct_alice
-    contract.evaluate_service_health(pid)
-
-    assert contract.get_policy(pid)["collateral_pool"] == 980
-    assert contract.get_incident(1)["slashed_amount"] == 20
-    assert contract.get_claimable_balance(_hex(direct_alice)) == 0
+    with direct_vm.expect_revert("inactive"):
+        contract.evaluate_service_health(pid)
 
 
 def test_evaluate_rounding_dust_conserves_collateral(
@@ -252,6 +304,120 @@ def test_evaluate_rounding_dust_conserves_collateral(
     assert contract.get_incident(1)["slashed_amount"] == 9
 
 
+def test_claim_compensation_resets_balance(direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_bob
+    contract.subscribe_to_policy(pid)
+
+    _mock_health(direct_vm, "MAJOR_OUTAGE", 100, True)
+    direct_vm.sender = direct_alice
+    contract.evaluate_service_health(pid)
+
+    direct_vm.sender = direct_bob
+    claimed = contract.claim_compensation()
+    assert claimed == 20  # single subscriber receives the full slash
+    assert contract.get_claimable_balance(_hex(direct_bob)) == 0
+
+    # Reclaim is a no-op once reset.
+    assert contract.claim_compensation() == 0
+
+
+def test_deactivate_withdraw_returns_collateral_to_provider(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    # Locked-funds fix: the provider can deactivate and pull the remaining
+    # collateral back through the same claim path subscribers use.
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice, collateral=1000)
+    direct_vm.sender = direct_bob
+    contract.subscribe_to_policy(pid)
+
+    direct_vm.sender = direct_alice
+    withdrawn = contract.deactivate_and_withdraw_collateral(pid)
+    assert withdrawn == 1000
+
+    policy = contract.get_policy(pid)
+    assert policy["collateral_pool"] == 0
+    assert policy["active"] is False
+
+    # The collateral becomes the provider's claimable balance, not new minted
+    # units: total claimable equals what left the pool.
+    assert contract.get_claimable_balance(_hex(direct_alice)) == 1000
+    assert contract.claim_compensation() == 1000
+    assert contract.get_claimable_balance(_hex(direct_alice)) == 0
+
+
+def test_deactivate_partial_after_slash(direct_vm, direct_deploy, direct_alice, direct_bob):
+    # Withdraw returns only what is left after an earlier slash, conserving value.
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice, collateral=1000)
+    direct_vm.sender = direct_bob
+    contract.subscribe_to_policy(pid)
+
+    _mock_health(direct_vm, "MAJOR_OUTAGE", 100, True)  # slashes 20
+    direct_vm.sender = direct_alice
+    contract.evaluate_service_health(pid)
+
+    direct_vm.sender = direct_alice
+    assert contract.deactivate_and_withdraw_collateral(pid) == 980
+    assert contract.get_policy(pid)["collateral_pool"] == 0
+
+
+def test_deactivate_non_provider_rejected(direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_bob
+    contract.subscribe_to_policy(pid)
+
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("provider"):
+        contract.deactivate_and_withdraw_collateral(pid)
+
+    # Rejection leaves the policy fully intact.
+    assert contract.get_policy(pid)["collateral_pool"] == 1000
+    assert contract.get_policy(pid)["active"] is True
+
+
+def test_deactivate_twice_rejected(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice)
+
+    direct_vm.sender = direct_alice
+    assert contract.deactivate_and_withdraw_collateral(pid) == 1000
+
+    with direct_vm.expect_revert("inactive"):
+        contract.deactivate_and_withdraw_collateral(pid)
+
+
+def test_deactivate_unknown_policy_reverts(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("Unknown policy"):
+        contract.deactivate_and_withdraw_collateral(4242)
+
+
+def test_incident_summary_truncated_to_cap(direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    pid = _register(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_bob
+    contract.subscribe_to_policy(pid)
+
+    _mock_health(direct_vm, "OPERATIONAL", 0, False, summary="y" * 500)
+    direct_vm.sender = direct_alice
+    contract.evaluate_service_health(pid)
+
+    # The stored summary is clamped to the 300 character ceiling.
+    assert len(contract.get_incident(1)["summary"]) == 300
+
+
+def test_evaluate_unknown_policy(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("Unknown policy"):
+        contract.evaluate_service_health(42)
+
+
 def test_view_methods_reject_unknown_ids(direct_vm, direct_deploy, direct_alice):
     contract = direct_deploy(CONTRACT)
     direct_vm.sender = direct_alice
@@ -263,10 +429,3 @@ def test_view_methods_reject_unknown_ids(direct_vm, direct_deploy, direct_alice)
         contract.get_incident(7)
     # Unknown account simply reads a zero balance (no revert).
     assert contract.get_claimable_balance(_hex(direct_alice)) == 0
-
-
-def test_evaluate_unknown_policy(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy(CONTRACT)
-    direct_vm.sender = direct_alice
-    with direct_vm.expect_revert("Unknown policy"):
-        contract.evaluate_service_health(42)

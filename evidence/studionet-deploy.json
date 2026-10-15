@@ -7,12 +7,20 @@
     ]
   },
   "deployer": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
-  "contract_address": "0xD938694c9C745d9816650B944a32D3c45a95E710",
-  "deploy_tx": "0xfdaab70df0f936d437c167c4d90aa44261ee8db85bd8ea9ed35e64df2eea0865",
-  "explorer": "https://explorer-studio.genlayer.com/address/0xD938694c9C745d9816650B944a32D3c45a95E710",
+  "contract_address": "0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9",
+  "deploy_tx": "0xe22a60ec8ca08695bb13d060861068dcf4a1cbdb05234735c44d3365439701e0",
+  "explorer": "https://explorer-studio.genlayer.com/address/0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9",
   "runner": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
+  "integrity": {
+    "sha256_local": "f79e60e9bff30498ef1f5eb007ed998867c8a45c99600563fbc0286dc4691cb7",
+    "sha256_chain": "f79e60e9bff30498ef1f5eb007ed998867c8a45c99600563fbc0286dc4691cb7",
+    "local_bytes": 19462,
+    "chain_bytes": 19462,
+    "match_local_chain": true
+  },
   "evidence": {
     "policy_id_return": "1",
+    "subscriber": "0xa9Ca722f99bA3B4e7EDb361e47c2e959c0326B12",
     "policy_after": {
       "active": true,
       "collateral_pool": 1000000,
@@ -36,24 +44,54 @@
       "total_checks": 0,
       "uptime_bps": 10000
     },
-    "claimable": 0,
+    "nonprovider_withdraw_reverted": true,
+    "nonprovider_withdraw_reason": "[EXPECTED] Only the provider may withdraw policy 1",
+    "withdraw_amount": "1000000",
+    "policy_final": {
+      "active": false,
+      "collateral_pool": 0,
+      "failed_checks": 0,
+      "policy_id": 1,
+      "provider": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
+      "service_name": "payments-api",
+      "slash_rate_bps": 200,
+      "status_url": "https://www.githubstatus.com/api/v2/status.json",
+      "subscriber_count": 1,
+      "target_uptime_bps": 9990,
+      "total_checks": 0
+    },
+    "provider_claimable_after_withdraw": 1000000,
     "transactions": [
       {
         "step": "register_policy",
-        "tx": "0x5e454baa2ee1aa0efd83275ed298cc8fb377f6b325bf86a1fefe26b73db6e001",
+        "tx": "0xd4c7edbcb49b3c72779d96ec4a3b7860669bcf021b30197d36afbbebe74310f9",
         "consensus": "MAJORITY_AGREE",
         "exec_status": "return",
         "return_data": "1"
       },
       {
         "step": "subscribe_to_policy",
-        "tx": "0xcf7d5dab95bf5b16935ba6dbd144f9565b27c75f594f73937576fd03d59e5b21",
+        "tx": "0x0c11bddd395356ed09d1a0e097c0ed3c84d3e82bb18d5742f6ae2037d3092205",
         "consensus": "MAJORITY_AGREE",
         "exec_status": "return"
       },
       {
+        "step": "nonprovider_withdraw",
+        "tx": "0x553d823f98c30471f3d057b280fc2cc7e9d976165298f15b80a9d93a3895bb9c",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "rollback",
+        "revert_reason": "[EXPECTED] Only the provider may withdraw policy 1"
+      },
+      {
+        "step": "provider_withdraw",
+        "tx": "0x3aa1804439a282d6cea7d0e1e08fbd9c8af7cc62b5e8e11872636366b3852742",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "return_data": "1000000"
+      },
+      {
         "step": "register_policy_invalid",
-        "tx": "0x3922c07934442f18df5404b020b5b9986bcc923616ca3a15877c05295d312f1a",
+        "tx": "0xa51ade4131010ab332af2f3d0b0e6f74a001afc7fcbe8fdad1f06664b8c0566e",
         "consensus": "MAJORITY_AGREE",
         "exec_status": "rollback",
         "revert_reason": "[EXPECTED] status_url must be http(s)"
@@ -62,5 +100,5 @@
     "invalid_reverted": true,
     "invalid_revert_reason": "[EXPECTED] status_url must be http(s)"
   },
-  "verified_at": "2026-10-14T12:40:59Z"
+  "verified_at": "2026-10-15T09:11:29Z"
 }

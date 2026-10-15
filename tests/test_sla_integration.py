@@ -63,12 +63,14 @@ def test_deploy_and_drive_studionet():
     # The provider policy is readable back through the view interface.
     policy = evidence["policy_after"]
     assert policy["service_name"] == "payments-api"
-    assert policy["target_uptime_bps"] == 9990
-    assert policy["slash_rate_bps"] == 200
+    assert policy["target_uptime_bps"] == _driver.DEMO_TARGET_BPS
+    assert policy["slash_rate_bps"] == _driver.DEMO_SLASH_RATE_BPS
     assert policy["provider"].lower() == account.address.lower()
 
-    # The deployer subscribed, so exactly one protected subscriber exists.
+    # A separate subscriber account subscribed, so exactly one protected
+    # subscriber exists and the policy is still active before withdrawal.
     assert policy["subscriber_count"] == 1
+    assert policy["active"] is True
 
     # With no evaluations yet, uptime is 100% and the policy is compliant.
     metrics = evidence["metrics"]
@@ -76,11 +78,20 @@ def test_deploy_and_drive_studionet():
     assert metrics["uptime_bps"] == 10000
     assert metrics["compliant"] is True
 
-    # No incident has fired, so nothing is claimable yet.
-    assert int(evidence["claimable"]) == 0
+    # A non-provider must not be able to drain the collateral pool.
+    assert evidence["nonprovider_withdraw_reverted"], "non-provider withdraw must revert"
+
+    # The provider withdraws the full remaining collateral and can claim it back
+    # (the locked-funds fix), leaving an inactive, emptied policy.
+    assert int(evidence["withdraw_amount"]) == _driver.DEMO_COLLATERAL
+    final = evidence["policy_final"]
+    assert final["active"] is False
+    assert int(final["collateral_pool"]) == 0
+    assert int(evidence["provider_claimable_after_withdraw"]) == _driver.DEMO_COLLATERAL
 
     # Adversarial input must revert on chain, exactly as it does in direct mode.
     assert evidence["invalid_reverted"], "invalid register_policy should revert on studionet"
 
-    # At least the deploy + two accepted writes were finalized.
-    assert len(evidence["transactions"]) >= 2
+    # The deploy plus the five driven writes (subscribe, two withdraw attempts,
+    # provider withdraw, invalid register) all reached FINALIZED.
+    assert len(evidence["transactions"]) >= 5

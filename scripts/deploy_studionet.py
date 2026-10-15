@@ -25,6 +25,8 @@ Optionally skip a fresh deploy and reuse an existing address:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +41,29 @@ CONTRACT = ROOT / "contracts" / "sla_uptime_insurance.py"
 EVIDENCE = ROOT / "evidence"
 
 DEFAULT_TIMEOUT = int(os.environ.get("GENLAYER_DEPLOY_TIMEOUT", "900"))
+
+# Collateral locked by the demo provider policy, kept identical to the value
+# asserted by the integration test so a green run and the evidence agree.
+DEMO_COLLATERAL = 1_000_000
+DEMO_SLASH_RATE_BPS = 200
+DEMO_TARGET_BPS = 9990
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def fetch_chain_code(client, address: str) -> bytes:
+    # gen_getContractCode returns the deployed source as base64. Decoding it
+    # gives the exact bytes the chain runs, which is what integrity is checked
+    # against. Raises if the RPC returns an error object.
+    resp = client.w3.provider.make_request("gen_getContractCode", [address])
+    if "error" in resp:
+        raise SystemExit(f"gen_getContractCode failed for {address}: {resp['error']}")
+    result = resp.get("result")
+    if not isinstance(result, str):
+        raise SystemExit(f"gen_getContractCode returned no code string for {address}")
+    return base64.b64decode(result)
 
 
 def load_dotenv() -> None:
@@ -118,6 +143,21 @@ def assert_execution_ok(receipt: dict, label: str) -> None:
         )
 
 
+def retry_read(fn, label: str, attempts: int = 12, delay: int = 6):
+    # studionet reads can drop the SSL connection mid-call (transient
+    # SSLEOFError). Reads are pure and idempotent, so retry the same call rather
+    # than tearing down an otherwise-good deployment run.
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            print(f"  [retry] {label}: read attempt {i + 1} failed ({type(exc).__name__}); sleeping {delay}s")
+            time.sleep(delay)
+    raise SystemExit(f"{label} failed after {attempts} read attempts: {last}")
+
+
 def explorer_type(address: str) -> str:
     import urllib.error
     import urllib.request
@@ -163,6 +203,10 @@ def deploy_contract(client, account) -> tuple[str, str]:
 
 def drive(client, account, address: str) -> dict:
     txs: list[dict] = []
+    # A second, ephemeral signer plays the subscriber role so provider and
+    # subscriber are distinct accounts. studionet is gasless, so it needs no
+    # balance. Its private key is random and discarded after the run.
+    subscriber = create_account()
 
     # --- write: register_policy (provider = deployer) ---
     print("\n[write] register_policy ...")
@@ -171,7 +215,13 @@ def drive(client, account, address: str) -> dict:
             address,
             "register_policy",
             account=account,
-            args=["payments-api", "https://www.githubstatus.com/api/v2/status.json", 9990, 1_000_000, 200],
+            args=[
+                "payments-api",
+                "https://www.githubstatus.com/api/v2/status.json",
+                DEMO_TARGET_BPS,
+                DEMO_COLLATERAL,
+                DEMO_SLASH_RATE_BPS,
+            ],
         )
     )
     print(f"    tx={tx_reg}")
@@ -188,16 +238,11 @@ def drive(client, account, address: str) -> dict:
         }
     )
 
-    # --- read: get_policy(1) ---
-    print("\n[read] get_policy(1) ...")
-    policy = client.read_contract(address, "get_policy", args=[1])
-    print(f"    {json.dumps(policy, default=str)}")
-
-    # --- write: subscribe_to_policy(1) (same EOA subscribes) ---
-    print("\n[write] subscribe_to_policy(1) ...")
+    # --- write: subscribe_to_policy(1) by the ephemeral subscriber ---
+    print("\n[write] subscribe_to_policy(1) by subscriber ...")
     tx_sub = str(
         client.write_contract(
-            address, "subscribe_to_policy", account=account, args=[1]
+            address, "subscribe_to_policy", account=subscriber, args=[1]
         )
     )
     print(f"    tx={tx_sub}")
@@ -214,18 +259,78 @@ def drive(client, account, address: str) -> dict:
 
     # --- reads after the writes ---
     print("\n[read] get_policy(1) after subscribe ...")
-    policy_after = client.read_contract(address, "get_policy", args=[1])
+    policy_after = retry_read(
+        lambda: client.read_contract(address, "get_policy", args=[1]), "get_policy"
+    )
     print(f"    {json.dumps(policy_after, default=str)}")
 
     print("\n[read] get_compliance_metrics(1) ...")
-    metrics = client.read_contract(address, "get_compliance_metrics", args=[1])
+    metrics = retry_read(
+        lambda: client.read_contract(address, "get_compliance_metrics", args=[1]),
+        "get_compliance_metrics",
+    )
     print(f"    {json.dumps(metrics, default=str)}")
 
-    print("\n[read] get_claimable_balance(deployer) ...")
-    claimable = client.read_contract(
-        address, "get_claimable_balance", args=[account.address]
+    # --- attack path: a NON-provider must not be able to withdraw ---
+    print("\n[write] deactivate_and_withdraw_collateral(1) by NON-provider (expect rollback) ...")
+    tx_bc = str(
+        client.write_contract(
+            address,
+            "deactivate_and_withdraw_collateral",
+            account=subscriber,
+            args=[1],
+        )
     )
-    print(f"    {claimable}")
+    rc_bc = wait_for_final(client, tx_bc, DEFAULT_TIMEOUT, "nonprovider_withdraw")
+    bc_status = exec_status(rc_bc)
+    bc_payload = exec_payload(rc_bc)
+    txs.append(
+        {
+            "step": "nonprovider_withdraw",
+            "tx": tx_bc,
+            "consensus": result_name(rc_bc),
+            "exec_status": bc_status,
+            "revert_reason": bc_payload,
+        }
+    )
+    print(f"    exec_status={bc_status} reason={bc_payload!r}")
+
+    # --- happy path: the provider withdraws remaining collateral ---
+    print("\n[write] deactivate_and_withdraw_collateral(1) by provider ...")
+    tx_wd = str(
+        client.write_contract(
+            address,
+            "deactivate_and_withdraw_collateral",
+            account=account,
+            args=[1],
+        )
+    )
+    rc_wd = wait_for_final(client, tx_wd, DEFAULT_TIMEOUT, "provider_withdraw")
+    assert_execution_ok(rc_wd, "provider_withdraw")
+    withdraw_amount = exec_payload(rc_wd)
+    txs.append(
+        {
+            "step": "provider_withdraw",
+            "tx": tx_wd,
+            "consensus": result_name(rc_wd),
+            "exec_status": exec_status(rc_wd),
+            "return_data": withdraw_amount,
+        }
+    )
+    print(f"    withdrawn={withdraw_amount}")
+
+    print("\n[read] get_policy(1) after withdraw ...")
+    policy_final = retry_read(
+        lambda: client.read_contract(address, "get_policy", args=[1]), "get_policy final"
+    )
+    print(f"    {json.dumps(policy_final, default=str)}")
+
+    print("\n[read] get_claimable_balance(provider) after withdraw ...")
+    provider_claimable = retry_read(
+        lambda: client.read_contract(address, "get_claimable_balance", args=[account.address]),
+        "get_claimable_balance",
+    )
+    print(f"    {provider_claimable}")
 
     # --- adversarial input must revert on chain too ---
     print("\n[write] register_policy(invalid url) is expected to revert ...")
@@ -253,9 +358,14 @@ def drive(client, account, address: str) -> dict:
 
     return {
         "policy_id_return": policy_id,
+        "subscriber": subscriber.address,
         "policy_after": policy_after,
         "metrics": metrics,
-        "claimable": claimable,
+        "nonprovider_withdraw_reverted": bc_status != "return",
+        "nonprovider_withdraw_reason": bc_payload,
+        "withdraw_amount": withdraw_amount,
+        "policy_final": policy_final,
+        "provider_claimable_after_withdraw": provider_claimable,
         "transactions": txs,
         "invalid_reverted": bad_status != "return",
         "invalid_revert_reason": bad_payload,
@@ -283,6 +393,27 @@ def main() -> int:
 
     evidence = drive(client, account, address)
 
+    # 3-way integrity starts here: the bytes we submit (read_text normalizes to
+    # LF, which .gitattributes pins for the repo) versus the bytes the chain
+    # actually runs, pulled back through gen_getContractCode.
+    local_bytes = CONTRACT.read_text(encoding="utf-8").encode("utf-8")
+    chain_bytes = fetch_chain_code(client, address)
+    integrity = {
+        "sha256_local": sha256_hex(local_bytes),
+        "sha256_chain": sha256_hex(chain_bytes),
+        "local_bytes": len(local_bytes),
+        "chain_bytes": len(chain_bytes),
+        "match_local_chain": local_bytes == chain_bytes,
+    }
+    if not integrity["match_local_chain"]:
+        print("[deploy] ERROR: on-chain code does not match the local source", file=sys.stderr)
+    print(
+        "[deploy] sha256 local  = " + integrity["sha256_local"]
+    )
+    print(
+        "[deploy] sha256 chain  = " + integrity["sha256_chain"]
+    )
+
     record = {
         "network": {"name": "studionet", "chain_id": studionet.id, "rpc_urls": list(studionet.rpc_urls)},
         "deployer": account.address,
@@ -290,6 +421,7 @@ def main() -> int:
         "deploy_tx": deploy_tx,
         "explorer": f"https://explorer-studio.genlayer.com/address/{address}",
         "runner": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
+        "integrity": integrity,
         "evidence": evidence,
         "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
