@@ -3,13 +3,13 @@
 A production-grade, standalone GenLayer Intelligent Contract primitive for
 decentralized SLA (Service Level Agreement) uptime insurance. It monitors a
 service provider's public status endpoint, reaches validator consensus on the
-observed service health, and automatically settles the outcome on chain: it
-slashes provider collateral, credits compensation to protected subscribers, and
-writes an immutable incident record.
+observed service uptime, and settles the outcome on chain against ONE enforced
+SLA-breach rule: it slashes provider collateral only for a true breach, credits
+compensation to protected subscribers, and writes an immutable record.
 
 - Contract: [`contracts/sla_uptime_insurance.py`](contracts/sla_uptime_insurance.py)
 - Network: GenLayer `studionet` (chain id `61999`)
-- Deployed address: `0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9`
+- Deployed address: `0x397C73Fa3a192372A74BBFe7a063d15B260B7A7D`
 - Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
 - Deployed source tag: `studionet-v1` (the hardened `main` HEAD)
 
@@ -29,14 +29,16 @@ the better lawyers.
 
 `SLAUptimeInsurance` turns that promise into an enforceable on-chain contract:
 
-- A provider registers a service and locks a **collateral pool**.
+- A provider registers a service, declares a `target_uptime_bps` SLA goal, and
+  locks a **collateral pool**.
 - Anyone can **subscribe** to that policy as a protected consumer.
-- The contract **evaluates** the provider's live status endpoint. Because a
-  status page is external, subjective, and rendered by non-deterministic systems,
-  the verdict is decided through GenLayer's equivalence principle so independent
-  validators agree on what really happened.
-- When an outage is confirmed, the contract deterministically **slashes** the
-  provider collateral and distributes compensation to subscribers.
+- The contract **evaluates** the provider's live status endpoint through
+  GenLayer's equivalence principle so independent validators agree on the
+  measured uptime. This audit records `verified_uptime_bps` and the resulting
+  compliance state; it moves no money.
+- **Settlement** applies the single SLA-breach rule: a policy still within its
+  target is refunded in full (never slashed); a policy that breached its target
+  is slashed by the shortfall and the slashed units are paid to subscribers.
 - Subscribers **claim** their accrued compensation.
 
 Why it is a primitive, not an app:
@@ -50,60 +52,58 @@ Why it is a primitive, not an app:
 
 ---
 
-## 2. Consensus & Equivalence Design
+## 2. The single SLA-breach rule
 
-The hardest part of this contract is the boundary between the deterministic
-on-chain world and the non-deterministic real world. Getting that boundary right
-is what makes the payouts defensible rather than gameable.
+There is exactly one predicate, and it is the only place an uptime is ever
+compared against a target:
 
-### The equivalence problem
+```
+COMPLIANT (is_sla_breached == False)  <=>  an evaluation is recorded and verified_uptime_bps >= target_uptime_bps
+BREACHED  (is_sla_breached == True)   <=>  an evaluation is recorded and verified_uptime_bps <  target_uptime_bps
+```
 
-Two APIs cannot be blindly trusted here:
+`is_sla_breached(policy_id)`, `get_compliance_metrics(policy_id)`, the audit step
+`evaluate_service_health`, and both settlement paths `settle_policy` and
+`claim_sla_compensation` all derive from this one comparison (the shared pure
+helper `_breach_for`). The compensation for a breach is the shortfall-based
+formula in section 3. A compliant (or not-yet-evaluated) policy can never be
+slashed: settlement refunds 100% of the collateral to the provider, and any
+attempt to slash it through `claim_sla_compensation` reverts with
+`SLA target met: policy is compliant and cannot be slashed`. There is no owner or
+admin override of `target_uptime_bps`.
 
-1. `gl.nondet.web.render(status_url, mode="text")` returns live HTML/text that
-   can change between the leader's read and a validator's read.
-2. `gl.nondet.exec_prompt(...)` classifies that text with an LLM, whose output is
-   inherently non-deterministic in wording.
+This replaced an earlier design where the slash was keyed to a status label and a
+per-incident `slash_rate_bps`, while compliance was keyed to `target_uptime_bps`,
+so the two could disagree. That incoherence is fixed: settlement now uses the
+declared `target_uptime_bps` and the resulting compliance state, consistently
+with `is_sla_breached`. See `docs/adversarial-review.md` finding F7.
 
-`strict_eq` on the raw LLM answer would fail consensus every time (different
-free-text), and a leader-only or format-only validator would let a single
-malicious node decide whether a provider "had an outage" and drain its
-collateral. Both are unacceptable for anything that touches funds.
+### Consensus & equivalence design
 
-### The chosen principle: comparative verification of a canonical decision
+The hardest part is the boundary between the deterministic on-chain world and the
+non-deterministic real world:
+
+1. `gl.nondet.web.render(status_url, mode="text")` returns live content that can
+   change between the leader's read and a validator's read.
+2. `gl.nondet.exec_prompt(...)` classifies that text with an LLM.
 
 `evaluate_service_health` reads `status_url` and `service_name` from storage
 *before* entering the non-deterministic block, so no contract state is touched
-inside it. Inside, a zero-argument closure:
+inside it. Inside, a zero-argument closure fetches the live page and prompts the
+LLM to return a canonical snapshot, normalized through `_parse_health`, which
+snaps the status to one of the three allowed enumerations and clamps the measured
+`verified_uptime_bps` to 0..10000. The snapshot runs through
+`gl.eq_principle.prompt_comparative`, whose principle requires each validator to
+re-fetch the same page and agree exactly on `status_code` AND `verified_uptime_bps`
+(the free-text `summary` is deliberately not compared). A validator that reads a
+different status or a materially different uptime votes `False` and forces
+rotation, so no single node decides the measurement that later gates a payout.
 
-1. fetches the live status page,
-2. prompts the LLM to classify it into a canonical snapshot
-   `{"status_code", "severity_score", "is_sla_breached", "summary"}`,
-3. normalizes that snapshot through `_parse_health`, which snaps the status to one
-   of the three allowed enumerations and **derives `severity_score` from
-   `status_code` deterministically** (OPERATIONAL -> 0, DEGRADED -> 50,
-   MAJOR_OUTAGE -> 100). Free-text `summary` is deliberately excluded from the
-   compared fields.
-
-The snapshot is then run through `gl.eq_principle.prompt_comparative`, whose
-principle requires each validator to re-fetch the same page, re-run the same
-classification, and agree exactly on `status_code`, `severity_score` and
-`is_sla_breached`. That means:
-
-- Every validator independently verifies the live status page rather than
-  trusting the leader's formatting.
-- A leader cannot win by producing a well-formed but false verdict; a dissenting
-  validator that reads "OPERATIONAL" while the leader claims "MAJOR_OUTAGE" votes
-  `False` and forces rotation.
-- Unreachable pages raise a `[TRANSIENT]` error (empty body or fetch failure) so
-  consensus rotates instead of persisting a fabricated healthy reading.
-
-Only a small, validated decision surface (the status code) crosses the
-determinism boundary. Every unit of collateral moved is the product of pure
-integer arithmetic on chain, which is what the adversarial fund-safety rules
-demand.
-
-### Error classification
+Critically, the consensus step does NOT move money and does NOT decide the slash.
+It only records a bounded measurement; the breach and the entire payout are
+computed deterministically, on chain, by `_breach_for` and `_slash_from_shortfall`
+from `target_uptime_bps`. Unreachable or empty pages raise `[TRANSIENT]` so
+consensus rotates instead of persisting a fabricated reading.
 
 | Prefix | Meaning | Consensus policy |
 |--------|---------|------------------|
@@ -128,21 +128,41 @@ stored; `TreeMap` and `DynArray` are.
 | `status_url` | `str` | http(s) endpoint fetched during evaluation |
 | `target_uptime_bps` | `u256` | SLA target in basis points (9990 = 99.90%) |
 | `collateral_pool` | `u256` | Remaining provider collateral (units) |
-| `slash_rate_bps` | `u256` | Penalty rate per confirmed incident (basis points) |
+| `verified_uptime_bps` | `u256` | Last consensus-measured uptime (bps); 0 before any audit |
 | `total_checks` | `u256` | Number of evaluations run |
-| `failed_checks` | `u256` | Evaluations that observed DEGRADED or MAJOR_OUTAGE |
-| `active` | `bool` | Whether the policy is open for evaluation |
+| `failed_checks` | `u256` | Evaluations whose status was not OPERATIONAL |
+| `evaluated` | `bool` | Whether an uptime has been recorded (required before any slash) |
+| `sla_breached` | `bool` | Compliance mirror derived from the single predicate |
+| `settled` | `bool` | Whether funds have been distributed and the policy closed |
+| `active` | `bool` | Whether the policy is open for evaluation/settlement |
 
 ### `IncidentRecord` (`@allow_storage @dataclass`)
+
+Written by the audit step (no funds move).
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `incident_id` | `u256` | Unique incident identifier |
 | `policy_id` | `u256` | Parent policy |
 | `status_code` | `str` | `OPERATIONAL`, `DEGRADED`, or `MAJOR_OUTAGE` |
-| `severity_score` | `u256` | `0`, `50`, or `100` (derived from status) |
-| `slashed_amount` | `u256` | Collateral units slashed for this incident |
+| `verified_uptime_bps` | `u256` | Measured uptime for this audit (bps) |
+| `sla_breached` | `bool` | Whether this measurement breached the target |
 | `summary` | `str` | Truncated evidence summary from the classification |
+
+### `SettlementRecord` (`@allow_storage @dataclass`)
+
+Written once, by settlement.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `policy_id` | `u256` | The settled policy (also the map key) |
+| `outcome` | `str` | `COMPLIANT` or `BREACHED` |
+| `target_uptime_bps` | `u256` | Declared target |
+| `verified_uptime_bps` | `u256` | Recorded measured uptime |
+| `shortfall_bps` | `u256` | `target - verified` when breached, else 0 |
+| `slash_amount` | `u256` | Collateral slashed from the provider (0 when compliant) |
+| `provider_refund` | `u256` | Collateral returned to the provider |
+| `subscriber_count` | `u256` | Insured subscribers the slash was split across |
 
 ### Contract storage layout
 
@@ -151,32 +171,33 @@ stored; `TreeMap` and `DynArray` are.
 | `next_policy_id` | `u256` | Monotonic policy id counter |
 | `next_incident_id` | `u256` | Monotonic incident id counter |
 | `policies` | `TreeMap[u256, SLAPolicy]` | Policy records by id |
-| `incidents` | `TreeMap[u256, IncidentRecord]` | Incident log by id |
+| `incidents` | `TreeMap[u256, IncidentRecord]` | Audit log by id |
+| `settlements` | `TreeMap[u256, SettlementRecord]` | Final settlement, keyed by policy id |
 | `policy_subscribers` | `TreeMap[u256, DynArray[Address]]` | Protected subscribers per policy |
-| `claimable_balances` | `TreeMap[Address, u256]` | Accrued, unclaimed compensation per account |
+| `claimable_balances` | `TreeMap[Address, u256]` | Accrued, unclaimed balance per account |
 
-`TreeMap` gives O(log n) keyed persistence; `DynArray` gives an append-only
-indexed list. Nested subscriber lists are created with
-`policy_subscribers.get_or_insert_default(policy_id)` (the GenVM-safe way to
-allocate an empty `DynArray` value inside a `TreeMap`).
+### Slash & refund math (deterministic, only at settlement)
 
-### Slash & payout math (deterministic)
-
-For a DEGRADED or MAJOR_OUTAGE verdict:
+With a recorded `verified_uptime_bps` and `target_uptime_bps`:
 
 ```
-base_slash = collateral_pool * slash_rate_bps // 10000
-slashed    = base_slash * severity_score // 100          # 50% or 100% weight
-per_sub    = slashed // subscriber_count                  # equal split
+if verified_uptime_bps >= target_uptime_bps:        # COMPLIANT
+    slash_amount   = 0
+    provider_refund = collateral
+    subscriber gets 0
+else:                                                # BREACHED
+    shortfall_bps  = target_uptime_bps - verified_uptime_bps
+    slash_amount   = min(max(collateral * shortfall_bps // 10000, 1), collateral)
+    provider_refund = collateral - slash_amount
+    per_sub        = slash_amount // subscriber_count   # remainder to earliest subs
 ```
 
-`slashed` is capped at `collateral_pool`, `per_sub` is credited to each
-subscriber's `claimable_balances`, and only the actually-distributed amount
-(`per_sub * subscriber_count`) is deducted from the pool, so rounding dust is
-never minted or double-counted. Every evaluation requires an active policy with
-at least one subscriber, so there is no zero-subscriber burn path, and a provider
-can withdraw the remaining pool at any time through
-`deactivate_and_withdraw_collateral`.
+The whole slash leaves the pool and is credited to subscribers (any indivisible
+remainder goes to the earliest subscribers, so nothing is minted or lost), the
+provider keeps `provider_refund`, and `slash_amount + provider_refund ==
+collateral` exactly. A confirmed breach always costs at least one unit, which is
+what makes `is_sla_breached` and `slash_amount > 0` logically identical. Both
+settlement paths run through this one code path, so they can never disagree.
 
 ---
 
@@ -186,23 +207,24 @@ can withdraw the remaining pool at any time through
 
 | Method | Parameters | Returns | Notes |
 |--------|-----------|---------|-------|
-| `register_policy` | `service_name: str, status_url: str, target_uptime_bps: u256, collateral_amount: u256, slash_rate_bps: u256` | `u256` (policy_id) | Rejects unless `service_name` is 1..64 chars, `status_url` is 8..512 chars, is http(s), and has no whitespace or newline; `target_uptime_bps` in 1..10000; `0 < slash_rate_bps <= 5000`; `0 < collateral_amount <= 1e30` |
+| `register_policy` | `service_name: str, status_url: str, target_uptime_bps: u256, collateral_amount: u256` | `u256` (policy_id) | Rejects unless `service_name` is 1..64 chars, `status_url` is 8..512 chars and http(s) with no whitespace/newline, `target_uptime_bps` in 1..10000, `0 < collateral_amount <= 1e30` |
 | `subscribe_to_policy` | `policy_id: u256` | `None` | Registers caller as a protected subscriber; rejects duplicates and unknown policies |
-| `evaluate_service_health` | `policy_id: u256` | `str` (status_code) | Requires an active policy with at least one subscriber; runs the consensus classification, updates counters, slashes and distributes on failure, writes an incident |
+| `evaluate_service_health` | `policy_id: u256` | `str` (status_code) | AUDIT ONLY, moves no money. Requires active, unsettled, `subscriber_count > 0`. Records `verified_uptime_bps`, sets `sla_breached`, writes an incident |
+| `settle_policy` | `policy_id: u256` | `u256` (slashed) | Provider or subscriber only. COMPLIANT -> 0 slash + full refund; BREACHED -> shortfall slash to subscribers + remainder refund. Closes the policy |
+| `claim_sla_compensation` | `policy_id: u256` | `u256` (slashed) | Subscriber only. Reverts `has not been evaluated` before any audit; reverts `SLA target met: policy is compliant and cannot be slashed` on a compliant policy; otherwise applies the breach slash |
 | `claim_compensation` | none | `u256` (claimed) | Pays out and resets the caller's claimable balance (reset-before-return prevents replay) |
-| `deactivate_and_withdraw_collateral` | `policy_id: u256` | `u256` (withdrawn) | Provider-only; deactivates the policy and moves the remaining `collateral_pool` into the provider's claimable balance, so collateral is never trapped |
+| `deactivate_and_withdraw_collateral` | `policy_id: u256` | `u256` (withdrawn) | Provider-only. Returns remaining pool for a compliant or un-audited policy; REVERTS on a confirmed breach (settle first), so a provider cannot dodge a slash |
 
 ### View methods (`@gl.public.view`)
 
 | Method | Parameters | Returns |
 |--------|-----------|---------|
+| `is_sla_breached` | `policy_id: u256` | `bool` from the single predicate |
 | `get_policy` | `policy_id: u256` | `dict` with all policy fields plus `subscriber_count` |
-| `get_incident` | `incident_id: u256` | `dict` with the incident record |
-| `get_compliance_metrics` | `policy_id: u256` | `dict` with `uptime_bps`, `target_uptime_bps`, `compliant`, `breach_margin_bps` |
+| `get_incident` | `incident_id: u256` | `dict` with the audit record |
+| `get_settlement` | `policy_id: u256` | `dict` with the settlement breakdown |
+| `get_compliance_metrics` | `policy_id: u256` | `dict` with `verified_uptime_bps`, `target_uptime_bps`, `compliant`, `sla_breached`, `shortfall_bps` |
 | `get_claimable_balance` | `account: str` | `u256` unclaimed balance for that address |
-
-`uptime_bps = ((total_checks - failed_checks) * 10000) // total_checks` (100% when
-no checks have run yet), compared against `target_uptime_bps` for `compliant`.
 
 ### Constructor
 
@@ -215,46 +237,47 @@ no checks have run yet), compared against `target_uptime_bps` for `compliant`.
 
 Deployed and driven on the shared GenLayer `studionet` (gasless, chain id
 `61999`). Every transaction below was verified FINALIZED **and** execution
-successful by inspecting the leader receipt's execution status (FINALIZED alone
-is a lifecycle state, not proof of success).
+successful (or reverted with the exact expected reason) by inspecting the leader
+receipt's execution status; FINALIZED alone is a lifecycle state, not proof.
 
 Machine-readable proof: [`evidence/studionet-deploy.json`](evidence/studionet-deploy.json).
 
-- Contract address: `0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9`
-- Explorer: https://explorer-studio.genlayer.com/address/0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9
-- Deploy tx: `0xe22a60ec8ca08695bb13d060861068dcf4a1cbdb05234735c44d3365439701e0`
+- Contract address: `0x397C73Fa3a192372A74BBFe7a063d15B260B7A7D`
+- Explorer: https://explorer-studio.genlayer.com/address/0x397C73Fa3a192372A74BBFe7a063d15B260B7A7D
+- Deploy tx: `0xa2772b7e2fb0de9935c0da4a761f17e68bfeb99da02b1906da16cacbe5fb5389`
 - Provider (deployer) account: `0x154a452b0755EE812014C1405B15D905BA06f9c7`; a
   separate ephemeral account is the subscriber, so the two roles are distinct.
 
-| Step | Transaction | Result |
-|------|-------------|--------|
-| `register_policy` (collateral 1000000, rate 200bps, target 9990) | `0xd4c7edbcb49b3c72779d96ec4a3b7860669bcf021b30197d36afbbebe74310f9` | `return`, policy_id `1` |
-| `subscribe_to_policy(1)` (by subscriber) | `0x0c11bddd395356ed09d1a0e097c0ed3c84d3e82bb18d5742f6ae2037d3092205` | `return`, subscriber_count 0 -> 1 |
-| `deactivate_and_withdraw_collateral(1)` by NON-provider | `0x553d823f98c30471f3d057b280fc2cc7e9d976165298f15b80a9d93a3895bb9c` | `rollback`, `[EXPECTED] Only the provider may withdraw policy 1` |
-| `deactivate_and_withdraw_collateral(1)` by provider | `0x3aa1804439a282d6cea7d0e1e08fbd9c8af7cc62b5e8e11872636366b3852742` | `return`, withdrawn `1000000` |
-| `register_policy` with invalid `ftp://` URL | `0xa51ade4131010ab332af2f3d0b0e6f74a001afc7fcbe8fdad1f06664b8c0566e` | `rollback`, `[EXPECTED] status_url must be http(s)` |
+The deploy driver seeds the settlement rule on chain three ways:
 
-Read-back through the view interface:
+| Case | What it proves on chain | Result |
+|------|-------------------------|--------|
+| `guard` (deterministic, no web/LLM) | An un-audited policy is never slashed and the guards bind | `claim_sla_compensation` reverts `Policy 4 has not been evaluated...`; outsider `settle_policy` reverts `Only the provider or a subscriber may settle policy 4`; provider `settle_policy` returns `0` slashed, settlement `COMPLIANT`, `provider_refund 1000000` |
+| `compliant` (live consensus audit, target 9000) | A real audited, within-target policy is not slashed | `evaluate_service_health` returned `OPERATIONAL`, `verified_uptime_bps 10000`, `is_sla_breached false`; `claim_sla_compensation` reverted `SLA target met: policy is compliant and cannot be slashed`; `settle_policy` returned `0` slashed, full refund |
+| `breach` (live consensus audit, strict target 10000) | The predicate is applied even at a 100.00% goal | The same healthy GitHub status page measured `OPERATIONAL` (uptime 10000), which genuinely MEETS a 10000 target, so it is correctly COMPLIANT and slashed 0 |
+| adversarial input | Input validation still reverts on chain | `register_policy("bad", "ftp://nope", ...)` reverts `status_url must be http(s)` |
 
-- `get_policy(1)` after subscribe: provider `0x154a...f9c7`, `collateral_pool 1000000`, `slash_rate_bps 200`, `subscriber_count 1`, `total_checks 0`, `active true`.
-- `get_compliance_metrics(1)`: `uptime_bps 10000`, `target_uptime_bps 9990`, `compliant true`.
-- `get_policy(1)` after the provider withdraw: `active false`, `collateral_pool 0`.
-- `get_claimable_balance(provider)` after withdraw: `1000000` (the withdrawn collateral, claimable via `claim_compensation`).
-
-Both attack paths (the non-provider withdraw and the malformed URL) revert on
-chain with exactly the same `[EXPECTED]` reason they produce in direct mode,
-which is the point: consensus agrees on the failure paths too, and the accounting
-stays conserved (the withdrawn 1000000 leaves the pool and lands in the provider
-claimable balance, nothing else).
+Honest note on the breach case: the on-chain audit can only slash a provider when
+the *live* service actually misses its target. The monitored public endpoint
+(GitHub status) was fully operational during the run, so even a strict 100.00%
+target measured as COMPLIANT and was correctly refunded with zero slash. A true
+breach slash cannot be manufactured against a genuinely healthy service, so the
+breach path (and the exact shortfall formula, subscriber split, and
+compliance-conservation invariant) is proven by the deterministic direct tests
+`test_true_sla_breach_below_target_is_slashed_and_compensated` and
+`test_breach_compensation_path_slashes_and_multi_subscriber_distribution`, and
+the predicate equivalence by `test_is_sla_breached_and_settlement_use_identical_target_uptime_predicate`.
+What *is* proven on chain is the part the steward asked for: a within-target
+policy is never slashed, and the settlement path applies the declared
+`target_uptime_bps` consistently with `is_sla_breached`.
 
 Deployment integrity: the code returned by `gen_getContractCode` for the address
 above decodes to source that is byte-for-byte identical to
-`contracts/sla_uptime_insurance.py`. Local file, on-chain code and the GitHub
-raw file all hash to
-`sha256 f79e60e9bff30498ef1f5eb007ed998867c8a45c99600563fbc0286dc4691cb7`
-(19462 bytes), so the submitted source is exactly what runs on `studionet`.
-`.gitattributes` pins `* text=auto eol=lf` so the committed and fetched bytes are
-LF and match the deployed bytes.
+`contracts/sla_uptime_insurance.py`. Local file and on-chain code both hash to
+`sha256 e292d1e81f5f0b3f2d534c80e80ee8669d48b84f726b7a4103881559c7a6ba26`
+(31789 bytes, `match_local_chain: true`), and
+the committed git blob matches the same bytes because `.gitattributes` pins
+`* text=auto eol=lf`. The third way (git raw blob) is verified at push time.
 
 ---
 
@@ -276,6 +299,8 @@ cp .env.example .env              # then fill in GENLAYER_PRIVATE_KEY
 genvm-lint check contracts/sla_uptime_insurance.py
 ```
 
+Reports Lint passed, Validation passed, 13 methods (7 write, 6 view), 0 errors.
+
 ### Run the fast direct-mode tests (no network)
 
 ```bash
@@ -283,17 +308,17 @@ pytest                          # runs the direct suite; integration is deselect
 pytest tests/test_sla_direct.py -v
 ```
 
-22 direct tests cover: policy registration and read-back; every input-validation
-revert (URL scheme, the 8..512 length window, embedded whitespace and newlines,
-the 1..64 `service_name` cap, and the `target`, `slash_rate` and `collateral`
-numeric bounds); subscriber registration plus duplicate prevention; the
-`OPERATIONAL`, `DEGRADED` and `MAJOR_OUTAGE` evaluations; multi-subscriber payout
-distribution and rounding-dust conservation; the incident summary truncation cap;
-the zero-subscriber and inactive-policy griefing guards on `evaluate_service_health`;
-the provider `deactivate_and_withdraw_collateral` path (full and partial, plus
-non-provider, double-withdraw and unknown-policy rejections); and
-`claim_compensation` reset semantics. Web render and LLM classification are
-mocked; the consensus validator path is exercised on `studionet`.
+30 direct tests cover: policy registration and read-back; every input-validation
+revert; subscriber registration plus duplicate prevention; the audit step recording
+compliance without moving money; the griefing/inactive guards; the three steward
+requirements (`test_policy_within_sla_target_is_not_slashed`,
+`test_true_sla_breach_below_target_is_slashed_and_compensated`,
+`test_is_sla_breached_and_settlement_use_identical_target_uptime_predicate`); the
+boundary case where a compliant policy cannot be slashed through the compensation
+path; multi-subscriber distribution and collateral conservation; settlement races
+and the stakeholder/authorization guards; and `claim_compensation` reset semantics.
+Web render and LLM classification are mocked; the consensus validator path is
+exercised on `studionet`.
 
 ### Deploy and drive on `studionet`
 
@@ -301,13 +326,17 @@ mocked; the consensus validator path is exercised on `studionet`.
 python scripts/deploy_studionet.py
 ```
 
-Deploys the contract, submits `register_policy`, then `subscribe_to_policy` from
-a second ephemeral account, attempts a NON-provider `deactivate_and_withdraw_collateral`
-(that must revert), performs the provider `deactivate_and_withdraw_collateral`,
-reads state back through the view methods, attempts one adversarial
-`register_policy` that must revert, verifies that the deployed `gen_getContractCode`
-bytes hash to the same sha256 as the local file, and writes the full proof to
-`evidence/studionet-deploy.json`.
+Deploys the contract, then seeds the `guard` (deterministic), `compliant` and
+`breach` cases through the real settlement and live consensus-audit paths, attempts
+the on-chain reverts (compensation on an un-audited policy, outsider settlement, a
+compliant slash, and a malformed registration), verifies that the deployed
+`gen_getContractCode` bytes hash to the same sha256 as the local file, and writes
+the full proof to `evidence/studionet-deploy.json`. To re-drive against an existing
+deployment without a fresh deploy:
+
+```bash
+SLA_CONTRACT_ADDRESS=0x... SLA_DEPLOY_TX=0x... python scripts/deploy_studionet.py
+```
 
 ### Run the integration test against `studionet`
 
@@ -316,8 +345,10 @@ pytest -m integration tests/test_sla_integration.py -v -s
 ```
 
 It reuses the exact deploy driver, so a green run and the collected evidence come
-from identical code. `studionet` is rate-limited per IP, so run these serially and
-wait for receipts (the driver already does).
+from identical code. It accepts `SLA_CONTRACT_ADDRESS`/`SLA_DEPLOY_TX` to run
+against an existing contract. `studionet` is rate-limited per IP and finality can
+be slow, so run these serially and allow generous timeouts (the driver waits for
+receipts).
 
 ### Repository layout
 
@@ -326,7 +357,7 @@ contracts/sla_uptime_insurance.py   the primitive
 tests/test_sla_direct.py            fast direct-mode tests
 tests/test_sla_integration.py       live studionet integration test
 tests/conftest.py                   makes the direct harness run on Windows (no-op elsewhere)
-scripts/deploy_studionet.py         deploy + drive + integrity + evidence collection
+scripts/deploy_studionet.py         deploy + seed both outcomes + integrity + evidence
 evidence/studionet-deploy.json      machine-readable on-chain proof
 docs/adversarial-review.md          adversarial security review, findings and proofs
 gltest.config.yaml                  network config (no secrets)
@@ -341,21 +372,23 @@ requirements.txt                    pinned toolchain
 
 - No private keys, secrets or `.env` values are ever stored on chain, in logs, or
   in this repository.
+- One predicate (`_breach_for`) decides compliance and every fund movement, so a
+  within-target policy can never be slashed and a true breach always is.
 - Every transition that moves value depends on validator-agreed external
   evidence, not a caller's claim, and each validator re-verifies the source.
 - All inputs that later feed fund math carry explicit floors and ceilings
-  (`target_uptime_bps` in 1..10000, `0 < slash_rate_bps <= 5000`,
-  `0 < collateral_amount <= 1e30`, `service_name` 1..64 chars, `status_url`
-  8..512 chars, http(s) and free of whitespace or newlines).
-- Slash is capped by the collateral pool, distribution only deducts what it
-  actually credits (no rounding mint), and claims reset the balance before
-  returning so a claim cannot be replayed.
-- `deactivate_and_withdraw_collateral` is provider-only and active-only, so the
-  full exit path (slash, withdraw, claim) is conserved and cannot be replayed or
-  called by the wrong party.
+  (`target_uptime_bps` in 1..10000, `0 < collateral_amount <= 1e30`, `service_name`
+  1..64 chars, `status_url` 8..512 chars, http(s) and free of whitespace or
+  newlines); the consensus uptime measurement is clamped to 0..10000.
+- Settlement is restricted to the provider or an insured subscriber; the
+  compensation path is subscriber-only and reverts on a compliant policy; the
+  provider cannot withdraw out of a confirmed breach.
+- Slash is capped by the collateral pool, the whole slash is distributed (no dust
+  minted or lost), `slash_amount + provider_refund == collateral`, and claims reset
+  the balance before returning so a claim cannot be replayed.
 
-The full adversarial walk-through (state machine, races, invariant, findings and
-the test that closes each one) lives in
+The full adversarial walk-through (state machine, races, invariant, findings F1-F9
+and the test that closes each one) lives in
 [`docs/adversarial-review.md`](docs/adversarial-review.md).
 
 ### Known limitations & trust assumptions (stated honestly)
@@ -364,17 +397,19 @@ the test that closes each one) lives in
   `status_url`. A dishonest provider could point it at a page that always renders
   "OPERATIONAL". Mitigation is economic, not cryptographic: subscribers choose
   reputable, independent status endpoints, and every validator re-fetches the page
-  itself. The contract does not, and cannot claim to be, injection-proof against a
-  provider who fully controls a misleading page.
-- `evaluate_service_health` is permissionless. Any account can trigger a check on
-  an active policy that has at least one subscriber. A false slash still requires
-  validator consensus on a real outage, so funds are safe, but an attacker could
-  inflate `total_checks` with genuine OPERATIONAL readings. A deployment that
-  cares about this should gate evaluation to the provider and its subscribers.
-- An outage on a policy with zero subscribers can no longer be evaluated: the
-  call reverts, so provider collateral is never burned to pay nobody (griefing
-  guard), covered by a dedicated test.
+  itself. The contract does not claim to be injection-proof against a provider who
+  fully controls a misleading page.
+- Measurement precision: `verified_uptime_bps` is the single numeric decision field
+  crossing the consensus boundary. It is clamped and must be agreed exactly
+  (disagreement rotates the leader); it is never used until recorded, and the payout
+  is pure on-chain integer arithmetic from it and `target_uptime_bps`.
+- Direct-mode tests mock the fetch and the LLM, so they exercise the leader path
+  and the deterministic money math; they do not prove validator agreement. The live
+  `studionet` run covers the validator path.
+- A breach slash is a live-market property: it only happens when the real audited
+  service actually misses its target, so it cannot be forced against a healthy
+  endpoint for a demo. The breach logic is therefore also fixed by direct tests.
 - Collateral is internal accounting (the contract holds no native value). The
-  provider withdraw path moves the remaining pool into a claimable balance rather
-  than transferring native GEN, so nothing real is locked in this primitive; a
-  wrapping escrow can settle the claimable ledger against real funds.
+  provider refund/withdraw path moves the pool into a claimable balance rather than
+  transferring native GEN, so nothing real is locked in this primitive; a wrapping
+  escrow can settle the claimable ledger against real funds.

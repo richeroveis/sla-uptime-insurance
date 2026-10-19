@@ -7,98 +7,322 @@
     ]
   },
   "deployer": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
-  "contract_address": "0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9",
-  "deploy_tx": "0xe22a60ec8ca08695bb13d060861068dcf4a1cbdb05234735c44d3365439701e0",
-  "explorer": "https://explorer-studio.genlayer.com/address/0x4602D7Ddb7B232443eae8D361cFA46fA89097Aa9",
+  "contract_address": "0x397C73Fa3a192372A74BBFe7a063d15B260B7A7D",
+  "deploy_tx": "0xa2772b7e2fb0de9935c0da4a761f17e68bfeb99da02b1906da16cacbe5fb5389",
+  "explorer": "https://explorer-studio.genlayer.com/address/0x397C73Fa3a192372A74BBFe7a063d15B260B7A7D",
   "runner": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
   "integrity": {
-    "sha256_local": "f79e60e9bff30498ef1f5eb007ed998867c8a45c99600563fbc0286dc4691cb7",
-    "sha256_chain": "f79e60e9bff30498ef1f5eb007ed998867c8a45c99600563fbc0286dc4691cb7",
-    "local_bytes": 19462,
-    "chain_bytes": 19462,
+    "sha256_local": "e292d1e81f5f0b3f2d534c80e80ee8669d48b84f726b7a4103881559c7a6ba26",
+    "sha256_chain": "e292d1e81f5f0b3f2d534c80e80ee8669d48b84f726b7a4103881559c7a6ba26",
+    "local_bytes": 31789,
+    "chain_bytes": 31789,
     "match_local_chain": true
   },
   "evidence": {
-    "policy_id_return": "1",
-    "subscriber": "0xa9Ca722f99bA3B4e7EDb361e47c2e959c0326B12",
-    "policy_after": {
-      "active": true,
-      "collateral_pool": 1000000,
-      "failed_checks": 0,
-      "policy_id": 1,
-      "provider": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
-      "service_name": "payments-api",
-      "slash_rate_bps": 200,
-      "status_url": "https://www.githubstatus.com/api/v2/status.json",
-      "subscriber_count": 1,
-      "target_uptime_bps": 9990,
-      "total_checks": 0
+    "subscriber": "0x50eddED53c4a55898873331910CF2fF6078442B3",
+    "guard_policy": {
+      "case": "guard",
+      "policy_id": 4,
+      "declared_target_uptime_bps": 9900,
+      "claim_requires_evaluation_reverted": true,
+      "claim_reason": "[EXPECTED] Policy 4 has not been evaluated; settlement needs a recorded uptime",
+      "outsider_settle_reverted": true,
+      "outsider_settle_reason": "[EXPECTED] Only the provider or a subscriber may settle policy 4",
+      "settle_exec_status": "return",
+      "slashed_amount": 0,
+      "settlement": {
+        "outcome": "COMPLIANT",
+        "policy_id": 4,
+        "provider_refund": 1000000,
+        "shortfall_bps": 0,
+        "slash_amount": 0,
+        "subscriber_count": 1,
+        "target_uptime_bps": 9900,
+        "verified_uptime_bps": 0
+      },
+      "provider_claimable_after_settle": 4000000
     },
-    "metrics": {
-      "breach_margin_bps": 10,
-      "compliant": true,
-      "failed_checks": 0,
-      "policy_id": 1,
-      "service_name": "payments-api",
-      "target_uptime_bps": 9990,
-      "total_checks": 0,
-      "uptime_bps": 10000
+    "compliant_policy": {
+      "case": "compliant",
+      "policy_id": 5,
+      "declared_target_uptime_bps": 9000,
+      "audit_status_code": "\"OPERATIONAL\"",
+      "evaluated_on_chain": true,
+      "metrics": {
+        "compliant": true,
+        "evaluated": true,
+        "failed_checks": 0,
+        "policy_id": 5,
+        "service_name": "svc-compliant",
+        "shortfall_bps": 0,
+        "sla_breached": false,
+        "target_uptime_bps": 9000,
+        "total_checks": 1,
+        "verified_uptime_bps": 10000
+      },
+      "is_sla_breached": false,
+      "subscriber_compensation_guard_reverted": true,
+      "subscriber_compensation_guard_reason": "[EXPECTED] SLA target met: policy is compliant and cannot be slashed",
+      "settle_exec_status": "return",
+      "slashed_amount": 0,
+      "settlement": {
+        "outcome": "COMPLIANT",
+        "policy_id": 5,
+        "provider_refund": 1000000,
+        "shortfall_bps": 0,
+        "slash_amount": 0,
+        "subscriber_count": 1,
+        "target_uptime_bps": 9000,
+        "verified_uptime_bps": 10000
+      },
+      "provider_claimable_after_settle": 5000000,
+      "audit_note": null
     },
-    "nonprovider_withdraw_reverted": true,
-    "nonprovider_withdraw_reason": "[EXPECTED] Only the provider may withdraw policy 1",
-    "withdraw_amount": "1000000",
-    "policy_final": {
-      "active": false,
-      "collateral_pool": 0,
-      "failed_checks": 0,
-      "policy_id": 1,
-      "provider": "0x154a452b0755EE812014C1405B15D905BA06f9c7",
-      "service_name": "payments-api",
-      "slash_rate_bps": 200,
-      "status_url": "https://www.githubstatus.com/api/v2/status.json",
-      "subscriber_count": 1,
-      "target_uptime_bps": 9990,
-      "total_checks": 0
+    "breach_policy": {
+      "case": "breach",
+      "policy_id": 6,
+      "declared_target_uptime_bps": 10000,
+      "audit_status_code": "\"OPERATIONAL\"",
+      "evaluated_on_chain": true,
+      "metrics": {
+        "compliant": true,
+        "evaluated": true,
+        "failed_checks": 0,
+        "policy_id": 6,
+        "service_name": "svc-breach",
+        "shortfall_bps": 0,
+        "sla_breached": false,
+        "target_uptime_bps": 10000,
+        "total_checks": 1,
+        "verified_uptime_bps": 10000
+      },
+      "is_sla_breached": false,
+      "subscriber_compensation_guard_reverted": true,
+      "subscriber_compensation_guard_reason": "[EXPECTED] SLA target met: policy is compliant and cannot be slashed",
+      "settle_exec_status": "return",
+      "slashed_amount": 0,
+      "settlement": {
+        "outcome": "COMPLIANT",
+        "policy_id": 6,
+        "provider_refund": 1000000,
+        "shortfall_bps": 0,
+        "slash_amount": 0,
+        "subscriber_count": 1,
+        "target_uptime_bps": 10000,
+        "verified_uptime_bps": 10000
+      },
+      "provider_claimable_after_settle": 6000000,
+      "audit_note": null
     },
-    "provider_claimable_after_withdraw": 1000000,
+    "invalid_reverted": true,
+    "invalid_revert_reason": "[EXPECTED] status_url must be http(s)",
     "transactions": [
       {
-        "step": "register_policy",
-        "tx": "0xd4c7edbcb49b3c72779d96ec4a3b7860669bcf021b30197d36afbbebe74310f9",
+        "step": "register_policy:guard:register",
+        "method": "register_policy",
+        "args": [
+          "svc-guard",
+          "https://www.githubstatus.com/api/v2/status.json",
+          9900,
+          1000000
+        ],
+        "tx": "0x815876309f3f27b1b622c1221122c582ebf11601983f037c855a42e5e083b5cb",
         "consensus": "MAJORITY_AGREE",
         "exec_status": "return",
-        "return_data": "1"
+        "finalized": true,
+        "return_data": "4"
       },
       {
-        "step": "subscribe_to_policy",
-        "tx": "0x0c11bddd395356ed09d1a0e097c0ed3c84d3e82bb18d5742f6ae2037d3092205",
-        "consensus": "MAJORITY_AGREE",
-        "exec_status": "return"
-      },
-      {
-        "step": "nonprovider_withdraw",
-        "tx": "0x553d823f98c30471f3d057b280fc2cc7e9d976165298f15b80a9d93a3895bb9c",
-        "consensus": "MAJORITY_AGREE",
-        "exec_status": "rollback",
-        "revert_reason": "[EXPECTED] Only the provider may withdraw policy 1"
-      },
-      {
-        "step": "provider_withdraw",
-        "tx": "0x3aa1804439a282d6cea7d0e1e08fbd9c8af7cc62b5e8e11872636366b3852742",
+        "step": "subscribe_to_policy:guard:subscribe",
+        "method": "subscribe_to_policy",
+        "args": [
+          4
+        ],
+        "tx": "0x18095d884a25d8068d4b5e67abf031736523fda7dfe1676537c5690d29bfc274",
         "consensus": "MAJORITY_AGREE",
         "exec_status": "return",
-        "return_data": "1000000"
+        "finalized": true,
+        "return_data": "null"
       },
       {
-        "step": "register_policy_invalid",
-        "tx": "0xa51ade4131010ab332af2f3d0b0e6f74a001afc7fcbe8fdad1f06664b8c0566e",
+        "step": "claim_sla_compensation:guard:claim-unevaluated",
+        "method": "claim_sla_compensation",
+        "args": [
+          4
+        ],
+        "tx": "0xe27213c9b710ac308d739d2546ca4038dd5c06f6140fb64fd9e098dc19c21bb0",
         "consensus": "MAJORITY_AGREE",
         "exec_status": "rollback",
+        "finalized": true,
+        "revert_reason": "[EXPECTED] Policy 4 has not been evaluated; settlement needs a recorded uptime"
+      },
+      {
+        "step": "settle_policy:guard:outsider-settle",
+        "method": "settle_policy",
+        "args": [
+          4
+        ],
+        "tx": "0xc33b2f5d7a04d34115bc2e61bf1530016c7259c2e13941445c87338dc86643ed",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "rollback",
+        "finalized": true,
+        "revert_reason": "[EXPECTED] Only the provider or a subscriber may settle policy 4"
+      },
+      {
+        "step": "settle_policy:guard:settle-unevaluated",
+        "method": "settle_policy",
+        "args": [
+          4
+        ],
+        "tx": "0xeab947be699415216ebbc0c1dbe76af9ee30adb087f58ccaee26bc5748a98015",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "0"
+      },
+      {
+        "step": "register_policy:compliant:register",
+        "method": "register_policy",
+        "args": [
+          "svc-compliant",
+          "https://www.githubstatus.com/api/v2/status.json",
+          9000,
+          1000000
+        ],
+        "tx": "0xd8bcdf7423a52dea14ee5e3d41abbf666a91c6cd2441ebdc4047b92c3aea6d15",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "5"
+      },
+      {
+        "step": "subscribe_to_policy:compliant:subscribe",
+        "method": "subscribe_to_policy",
+        "args": [
+          5
+        ],
+        "tx": "0x4eab57f2e4ac6536ce261f0724c7223a73c2830f28a07f61eef7920bb00238c8",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "null"
+      },
+      {
+        "step": "evaluate_service_health:compliant:evaluate",
+        "method": "evaluate_service_health",
+        "args": [
+          5
+        ],
+        "tx": "0xb0e02588f731b6db3130f170a10b70ec6cbe3e4dac901900c289309b6a952eb1",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "\"OPERATIONAL\""
+      },
+      {
+        "step": "claim_sla_compensation:compliant:claim-guard",
+        "method": "claim_sla_compensation",
+        "args": [
+          5
+        ],
+        "tx": "0xf15721f35d44065ccd52ffd2b4ce14cf348feeac6c04245e4980bd7a7577b968",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "rollback",
+        "finalized": true,
+        "revert_reason": "[EXPECTED] SLA target met: policy is compliant and cannot be slashed"
+      },
+      {
+        "step": "settle_policy:compliant:settle",
+        "method": "settle_policy",
+        "args": [
+          5
+        ],
+        "tx": "0x8ccc3df428ca71241abe5f96d0f2b5379fa6bd3da6a30198d4b98e3e5290f7ca",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "0"
+      },
+      {
+        "step": "register_policy:breach:register",
+        "method": "register_policy",
+        "args": [
+          "svc-breach",
+          "https://www.githubstatus.com/api/v2/status.json",
+          10000,
+          1000000
+        ],
+        "tx": "0x998eb194db6ef353a3d088aec6564eb60cb07b269bb72a64d773352a43509a03",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "6"
+      },
+      {
+        "step": "subscribe_to_policy:breach:subscribe",
+        "method": "subscribe_to_policy",
+        "args": [
+          6
+        ],
+        "tx": "0xb4234e563d667a3247e8ab591924a8ff466924a996fd1192ee85d9b73a66c1ff",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "null"
+      },
+      {
+        "step": "evaluate_service_health:breach:evaluate",
+        "method": "evaluate_service_health",
+        "args": [
+          6
+        ],
+        "tx": "0xfc302ca489b26ddd50702582b5b4dcac787e9ebb2fdfedd1a039e6c3ccc8f217",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "\"OPERATIONAL\""
+      },
+      {
+        "step": "claim_sla_compensation:breach:claim-guard",
+        "method": "claim_sla_compensation",
+        "args": [
+          6
+        ],
+        "tx": "0xa2e7498bc43c03f131708a94169a848691a2b5a190a6cbce76a6f273b224cc27",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "rollback",
+        "finalized": true,
+        "revert_reason": "[EXPECTED] SLA target met: policy is compliant and cannot be slashed"
+      },
+      {
+        "step": "settle_policy:breach:settle",
+        "method": "settle_policy",
+        "args": [
+          6
+        ],
+        "tx": "0x987e1ddcf5c13a350bff86e11474d7431a161931f27c8dd19076ae1f88921219",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "return",
+        "finalized": true,
+        "return_data": "0"
+      },
+      {
+        "step": "register_policy:invalid-register",
+        "method": "register_policy",
+        "args": [
+          "bad",
+          "ftp://nope",
+          9990,
+          1000
+        ],
+        "tx": "0xd36c3e8ba9d117b2dd757d93bcf155278dbdd8375db431e34aef6c82dc7986ae",
+        "consensus": "MAJORITY_AGREE",
+        "exec_status": "rollback",
+        "finalized": true,
         "revert_reason": "[EXPECTED] status_url must be http(s)"
       }
     ],
-    "invalid_reverted": true,
-    "invalid_revert_reason": "[EXPECTED] status_url must be http(s)"
+    "finalized_count": 16
   },
-  "verified_at": "2026-10-15T09:11:29Z"
+  "verified_at": "2026-10-19T11:11:57Z"
 }
